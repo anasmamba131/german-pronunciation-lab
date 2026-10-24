@@ -7,6 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from anki_reader import load_anki_database
 from cloud_runtime import create_service, model_path
 from schemas import CheckResponse
 
@@ -71,9 +72,16 @@ def render_hero() -> None:
     )
 
 
-def render_speech_button(sentence: str) -> None:
+def render_speech_button(
+    sentence: str,
+    *,
+    label: str = "Hear sentence",
+    compact: bool = False,
+    key_suffix: str = "",
+) -> None:
     """Speak the sentence with a German voice available in the browser."""
-    button_id = f"tts-{hashlib.sha1(sentence.encode('utf-8')).hexdigest()[:12]}"
+    identity = f"{sentence}\0{label}\0{key_suffix}".encode("utf-8")
+    button_id = f"tts-{hashlib.sha1(identity).hexdigest()[:12]}"
     safe_button_id = json.dumps(button_id)
     safe_sentence = (
         json.dumps(sentence, ensure_ascii=True)
@@ -81,11 +89,18 @@ def render_speech_button(sentence: str) -> None:
         .replace(">", "\\u003e")
         .replace("&", "\\u0026")
     )
+    safe_label = (
+        json.dumps(label, ensure_ascii=True)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    button_class = "tts-button compact" if compact else "tts-button"
     st.html(
         f"""
-        <button id="{button_id}" class="tts-button" type="button">
+        <button id="{button_id}" class="{button_class}" type="button">
           <span aria-hidden="true">&#128266;</span>
-          <span class="tts-label">Hear sentence</span>
+          <span class="tts-label">{html.escape(label)}</span>
         </button>
         <script>
           (() => {{
@@ -105,8 +120,9 @@ def render_speech_button(sentence: str) -> None:
               if (germanVoice) utterance.voice = germanVoice;
               const label = button.querySelector(".tts-label");
               label.textContent = "Speaking…";
-              utterance.onend = () => {{ label.textContent = "Hear sentence"; }};
-              utterance.onerror = () => {{ label.textContent = "Hear sentence"; }};
+              const idleLabel = {safe_label};
+              utterance.onend = () => {{ label.textContent = idleLabel; }};
+              utterance.onerror = () => {{ label.textContent = idleLabel; }};
               window.speechSynthesis.speak(utterance);
             }});
           }})();
@@ -114,6 +130,182 @@ def render_speech_button(sentence: str) -> None:
         """,
         unsafe_allow_javascript=True,
     )
+
+
+def note_value(fields: dict[str, str], *names: str) -> str:
+    for name in names:
+        value = fields.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def render_anki_study() -> None:
+    with st.container(key="anki_study", gap="small"):
+        st.html(
+            """
+            <div class="anki-heading">
+              <div>
+                <p class="eyebrow">YOUR PRIVATE STUDY DECK</p>
+                <h2>Open an Anki database</h2>
+              </div>
+              <span class="private-badge">Private session</span>
+            </div>
+            <p class="anki-privacy">
+              Your file is available only in this browser session. It is read
+              from a temporary file, deleted immediately after processing, and
+              never added to the public app. Other visitors cannot see or use it.
+            </p>
+            """
+        )
+        database_file = st.file_uploader(
+            "Upload collection.anki21 or collection.anki2",
+            type=["anki21", "anki2"],
+            accept_multiple_files=False,
+            max_upload_size=20,
+            key="anki_database_upload",
+            help="Upload the small collection database, not the large .apkg file.",
+        )
+
+        if database_file is None:
+            for state_key in (
+                "anki_database_signature",
+                "anki_deck",
+                "anki_note_index",
+                "anki_active_tag",
+                "anki_lesson_filter",
+            ):
+                st.session_state.pop(state_key, None)
+            st.caption(
+                "Nothing is uploaded yet. You will upload the file again after "
+                "closing this tab or when the app restarts."
+            )
+            return
+
+        database_bytes = database_file.getvalue()
+        database_signature = hashlib.sha256(database_bytes).hexdigest()
+        if st.session_state.get("anki_database_signature") != database_signature:
+            try:
+                deck = load_anki_database(database_bytes)
+            except ValueError as exc:
+                st.error(str(exc), icon=":material/error:")
+                return
+            st.session_state["anki_database_signature"] = database_signature
+            st.session_state["anki_deck"] = deck
+            st.session_state["anki_note_index"] = 0
+            st.session_state["anki_active_tag"] = "All notes"
+            st.session_state.pop("anki_lesson_filter", None)
+        else:
+            deck = st.session_state.get("anki_deck")
+            if deck is None:
+                try:
+                    deck = load_anki_database(database_bytes)
+                except ValueError as exc:
+                    st.error(str(exc), icon=":material/error:")
+                    return
+                st.session_state["anki_deck"] = deck
+
+        notes = deck["notes"]
+        tag_options = ["All notes", *deck["tags"]]
+        selected_tag = st.selectbox(
+            "Lesson or tag",
+            tag_options,
+            key="anki_lesson_filter",
+            help="Choose a lesson such as A1-L1, or study every note.",
+        )
+        if st.session_state.get("anki_active_tag") != selected_tag:
+            st.session_state["anki_active_tag"] = selected_tag
+            st.session_state["anki_note_index"] = 0
+
+        filtered_notes = (
+            notes
+            if selected_tag == "All notes"
+            else [note for note in notes if selected_tag in note["tags"]]
+        )
+        if not filtered_notes:
+            st.warning("No notes were found for this tag.")
+            return
+
+        note_index = min(
+            int(st.session_state.get("anki_note_index", 0)),
+            len(filtered_notes) - 1,
+        )
+        st.session_state["anki_note_index"] = note_index
+        note = filtered_notes[note_index]
+        fields = note["fields"]
+        german = note_value(fields, "German", "Word", "Vocab")
+        english = note_value(fields, "English", "Meaning", "Translation")
+        german_sentence = note_value(
+            fields,
+            "German Sentence",
+            "Sentence",
+            "Cloze Sentence",
+        )
+        english_sentence = note_value(
+            fields,
+            "English Sentence",
+            "Sentence Translation",
+        )
+        conjugation = note_value(fields, "Verb Conjugation", "Conjugation")
+        practice_sentence = german_sentence or german
+
+        st.html(
+            f"""
+            <article class="anki-card">
+              <div class="anki-card-topline">
+                <span>{note_index + 1} / {len(filtered_notes)}</span>
+                <span>{html.escape(selected_tag)}</span>
+              </div>
+              <h3>{html.escape(german or 'German note')}</h3>
+              <p class="anki-translation">{html.escape(english or 'No English translation')}</p>
+              {f'<p class="anki-sentence">{html.escape(german_sentence)}</p>' if german_sentence else ''}
+              {f'<p class="anki-sentence-translation">{html.escape(english_sentence)}</p>' if english_sentence else ''}
+              {f'<p class="anki-conjugation">{html.escape(conjugation)}</p>' if conjugation else ''}
+            </article>
+            """
+        )
+
+        if practice_sentence:
+            render_speech_button(
+                practice_sentence,
+                label="Hear this card",
+                compact=True,
+                key_suffix=str(note["id"]),
+            )
+
+        with st.container(
+            key="anki_navigation",
+            horizontal=True,
+            horizontal_alignment="distribute",
+            vertical_alignment="center",
+        ):
+            previous_note = st.button(
+                "← Previous",
+                disabled=note_index == 0,
+                key="anki_previous_note",
+            )
+            if practice_sentence:
+                use_sentence = st.button(
+                    "Use for pronunciation",
+                    type="primary",
+                    key="anki_use_sentence",
+                )
+            else:
+                use_sentence = False
+            next_note = st.button(
+                "Next →",
+                disabled=note_index == len(filtered_notes) - 1,
+                key="anki_next_note",
+            )
+
+        if previous_note:
+            st.session_state["anki_note_index"] = note_index - 1
+            st.rerun()
+        if next_note:
+            st.session_state["anki_note_index"] = note_index + 1
+            st.rerun()
+        if use_sentence:
+            st.session_state["sentence_input"] = practice_sentence
 
 
 def result_copy(status: str) -> str:
@@ -207,13 +399,18 @@ def render_result(result: CheckResponse) -> None:
             )
 
 
+st.session_state.setdefault(
+    "sentence_input",
+    "Entschuldigung, können Sie mir helfen?",
+)
+
 render_hero()
+render_anki_study()
 
 with st.container(key="workbench", gap="small"):
     st.html('<div class="step-label"><span>01</span> Sentence</div>')
     sentence = st.text_area(
         "German sentence",
-        value="Entschuldigung, können Sie mir helfen?",
         max_chars=500,
         help="Keep the sentence short for faster CPU analysis.",
         label_visibility="collapsed",

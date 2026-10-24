@@ -14,8 +14,21 @@ experimental phone and word evidence.
   them into memory. Streamlit Community Cloud may throttle or stop the app if it exceeds
   the available memory.
 - Recordings are processed in memory and are not intentionally persisted by the app.
-- The Windows-only Thorsten TTS and private Anki deck are intentionally excluded from
-  the public edition.
+- The Windows-only Thorsten TTS is excluded. Anki notes can be loaded from a
+  `collection.anki21` or `collection.anki2` file for the current browser session only.
+  The temporary server-side copy is deleted immediately after parsing and the file is
+  never committed to the public app. Visitors must upload their own database.
+
+## Use an Anki deck privately
+
+1. Open the public app and find **Your private study deck**.
+2. Select **Upload collection.anki21 or collection.anki2**.
+3. Choose the small extracted Anki database, not the large `.apkg` package.
+4. Pick a lesson/tag, browse the notes, and select **Use for pronunciation**.
+
+The selected database and study position are isolated to that Streamlit browser
+session. Closing the tab, clearing the session, or an app restart requires another
+upload. Uploaded databases are limited to 20 MB and 10,000 notes.
 
 ## Run locally
 
