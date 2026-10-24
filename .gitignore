@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+.streamlit/secrets.toml
+.venv/
+.model-cache/
+recordings/
+*.pyc
